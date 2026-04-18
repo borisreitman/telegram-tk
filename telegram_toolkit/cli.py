@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-telegram-tk — private DM cache (SQLite) + Telegram sync + login.
+telegram-tk — private DM sync + Telegram helpers.
 
-Subcommands: auth, search, rescan, full-rescan, show, name, channel-member, list.
+Subcommands: auth, search, rescan, full-rescan, show, name, list.
 """
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from telegram_toolkit.client import make_client  # noqa: E402
-from telegram_toolkit.dm_cache import (  # noqa: E402
+from telegram_toolkit.client import make_client
+from telegram_toolkit.dm_cache import (
     DEFAULT_CACHE,
     refresh_cache,
     search_local,
@@ -21,11 +21,11 @@ from telegram_toolkit.dm_cache import (  # noqa: E402
     _CacheTraceLive,
     _TracePeerSummary,
 )
-from telegram_toolkit.list_users import DEFAULT_LIST_OUTPUT_TZ  # noqa: E402
+from telegram_toolkit.list_users import DEFAULT_LIST_OUTPUT_TZ
 
 
 async def run_auth() -> None:
-    """Interactive login; writes session file from ``TELEGRAM_SESSION`` / default."""
+    """Interactive login."""
     client = make_client()
     await client.start()
     me = await client.get_me()
@@ -43,20 +43,11 @@ def _cmd_help(_ns: argparse.Namespace) -> int:
     return 0
 
 
-def _add_cache(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--cache",
-        type=Path,
-        default=DEFAULT_CACHE,
-        help=f"SQLite path (default: {DEFAULT_CACHE})",
-    )
-
-
 def _cmd_search(ns: argparse.Namespace) -> int:
     q = " ".join(ns.query).strip()
     if not q:
         raise SystemExit('search: pass a query string, e.g. telegram-tk search "hello"')
-    search_local(ns.cache.resolve(), q, header=ns.header, verbose=ns.verbose)
+    search_local(ns.cache.resolve(), q, header=False, verbose=ns.verbose)
     return 0
 
 
@@ -73,22 +64,22 @@ def _run_refresh(
     if not full and recent_peer_limit < 1:
         raise SystemExit("rescan: --recent-peer-limit must be at least 1 (or use full-rescan).")
     if not quiet:
-        print("# refreshing cache from Telegram…", file=sys.stderr)
+        print("# refreshing from Telegram…", file=sys.stderr)
         if full:
             print(
-                "# cache  mode: full rescan (all private user chats + all channel/group chat metadata)",
+                "# mode: full rescan (all private user chats + all channel/group metadata)",
                 file=sys.stderr,
             )
         else:
             line = (
-                f"# cache  mode: top {recent_peer_limit} private chats by recency (rescan); "
-                f"channel/group rows in chats: first {recent_peer_limit} dialogs only"
+                f"# mode: top {recent_peer_limit} private chats by recency (rescan); "
+                f"channel/group rows: first {recent_peer_limit} dialogs only"
             )
             if rescan_top_all:
                 line += " — rescan-top-all: refresh every peer in that window"
             else:
                 line += (
-                    " — skip peers whose cache is only outgoing (no incoming); "
+                    " — skip peers whose database is only outgoing (no incoming); "
                     "use --rescan-top-all to refresh all N"
                 )
             print(line, file=sys.stderr)
@@ -152,22 +143,15 @@ def _cmd_name(ns: argparse.Namespace) -> int:
     from telegram_toolkit.find_dm_peer import run_find_dm_peer
 
     q = " ".join(ns.name).strip()
-    return run_find_dm_peer(
-        q,
-        cache=ns.cache,
-        header=ns.header,
-        min_score=ns.min_score,
-        channel=ns.channel,
+    return asyncio.run(
+        run_find_dm_peer(
+            q,
+            cache=ns.cache,
+            min_score=ns.min_score,
+            channel=ns.channel,
+            pick=ns.pick,
+        )
     )
-
-
-def _cmd_channel_member(ns: argparse.Namespace) -> int:
-    from telegram_toolkit.channel_member import run_channel_member_cli
-
-    code = run_channel_member_cli(ns)
-    if ns.ok_if_not_member:
-        return 0
-    return code
 
 
 def _cmd_list(ns: argparse.Namespace) -> int:
@@ -177,7 +161,7 @@ def _cmd_list(ns: argparse.Namespace) -> int:
         list_users_run(
             ns.channel,
             ns.limit,
-            header=not ns.no_header,
+            header=False,
             cache_db=ns.cache,
             max_cache_age_sec=ns.max_cache_age,
             refresh=ns.refresh,
@@ -193,8 +177,11 @@ def _cmd_list(ns: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="telegram-tk",
-        description="Private DM SQLite cache and Telegram helpers.",
+        description="Private DM sync and Telegram helpers.",
     )
+    # Common argument (hidden from general help as it's advanced)
+    p.add_argument("--cache", type=Path, default=DEFAULT_CACHE, help=argparse.SUPPRESS)
+
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser(
@@ -207,36 +194,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show this help message and exit",
     )
 
-    sp = sub.add_parser("search", help="Search cached private message text (no Telegram I/O)")
-    _add_cache(sp)
+    sp = sub.add_parser("search", help="Search private message text")
     sp.add_argument(
         "--verbose",
         action="store_true",
         help="One TSV row per matching message (id, date, text)",
     )
     sp.add_argument(
-        "--header",
-        action="store_true",
-        help="Print column header row (default: off)",
-    )
-    sp.add_argument(
         "query",
         nargs="+",
         metavar="TEXT",
-        help="Substring to find (Unicode case-insensitive)",
+        help="Substring to find",
     )
 
     rp = sub.add_parser(
         "rescan",
-        help="Fetch new messages from Telegram for the top N recent private chats",
+        help="Fetch new messages for the top N recent private chats",
     )
-    _add_cache(rp)
     rp.add_argument(
         "--sync-per-peer-limit",
         type=int,
         default=None,
         metavar="N",
-        help="On first cache of a peer, fetch at most N newest messages (default: all)",
+        help="On first sync of a peer, fetch at most N newest messages",
     )
     rp.add_argument(
         "--recent-peer-limit",
@@ -248,7 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument(
         "--rescan-top-all",
         action="store_true",
-        help="Refresh every peer in the top-N window (default: skip if cache has only your outgoing)",
+        help="Refresh every peer in the top-N window",
     )
     rp.add_argument(
         "--no-bots",
@@ -258,20 +238,19 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument(
         "--notrace",
         action="store_true",
-        help="Suppress stderr progress (spinner / # cache lines)",
+        help="Suppress stderr progress",
     )
 
     fp = sub.add_parser(
         "full-rescan",
         help="Fetch from Telegram for every private user chat",
     )
-    _add_cache(fp)
     fp.add_argument(
         "--sync-per-peer-limit",
         type=int,
         default=None,
         metavar="N",
-        help="On first cache of a peer, fetch at most N newest messages (default: all)",
+        help="On first sync of a peer, fetch at most N newest messages",
     )
     fp.add_argument(
         "--no-bots",
@@ -281,108 +260,74 @@ def build_parser() -> argparse.ArgumentParser:
     fp.add_argument(
         "--notrace",
         action="store_true",
-        help="Suppress stderr progress (spinner / # cache lines)",
+        help="Suppress stderr progress",
     )
 
-    sh = sub.add_parser("show", help="Print cache + Telegram info for a user id")
-    _add_cache(sh)
+    sh = sub.add_parser("show", help="Print profile info for a user id")
     sh.add_argument(
         "user_id",
         type=int,
         metavar="USER_ID",
-        help="Telegram peer_user_id",
+        help="Telegram user id",
     )
     sh.add_argument(
         "--notrace",
         action="store_true",
-        help="Suppress stderr (# show … line)",
+        help="Suppress stderr info line",
     )
 
     fdp = sub.add_parser(
         "name",
-        help="Find dialogs by name or peer id (cache; fuzzy names; id shows peer_id and title)",
+        help="Find dialogs by name, username or ID",
     )
-    _add_cache(fdp)
     fdp.add_argument(
         "name",
         nargs="+",
         metavar="TEXT",
-        help="Name fragment (transliterate Russian, then fuzzy), or numeric / -100… / marked id",
+        help="Name fragment, username, or numeric ID",
     )
     fdp.add_argument(
         "--min-score",
         type=int,
         default=82,
         metavar="N",
-        help="rapidfuzz WRatio per word, 1–100 (default: 82)",
-    )
-    fdp.add_argument(
-        "--header",
-        action="store_true",
-        help="Print TSV header row",
+        help="Fuzzy threshold 1–100 (default: 82)",
     )
     fdp.add_argument(
         "--channel",
         metavar="CHANNEL",
-        help="Limit search to members of this channel (requires channel-member snapshots in cache)",
+        help="Limit search to members of this channel",
     )
-
-    cm = sub.add_parser(
-        "channel-member",
-        help="Print whether each user id is a member of a channel / megagroup (TSV)",
-    )
-    cm.add_argument("channel", help="@username, t.me link, or numeric id")
-    cm.add_argument(
-        "--id",
-        action="append",
-        default=[],
-        metavar="USER_ID",
-        help="User id (repeatable)",
-    )
-    cm.add_argument(
-        "--file",
-        metavar="PATH",
-        help="File with one user id per line (or TSV; first column)",
-    )
-    cm.add_argument(
-        "--no-header",
-        action="store_true",
-        help="Omit TSV header row",
-    )
-    cm.add_argument(
-        "--ok-if-not-member",
-        action="store_true",
-        help="Exit 0 even when some ids are not members",
+    fdp.add_argument(
+        "--pick",
+        type=int,
+        default=None,
+        metavar="N",
+        help="If several fuzzy matches for --channel: use the Nth match (1-based)",
     )
 
     lu = sub.add_parser(
         "list",
-        help="List all members of a channel or megagroup (TSV to stdout, or CSV via --output)",
+        help="List all members of a channel or megagroup (TSV)",
     )
     lu.add_argument(
         "channel",
         metavar="CHANNEL",
-        help="Title (same as telegram-tk name), or channel/group id: plain id, -100…, or marked -id",
+        help="Title fragment, @username, or numeric ID",
     )
     lu.add_argument(
         "--limit",
         type=int,
         default=None,
         metavar="N",
-        help="After sorting by join date, emit at most N rows (default: all)",
+        help="After sorting by join date, emit at most N rows",
     )
-    lu.add_argument(
-        "--no-header",
-        action="store_true",
-        help="Omit TSV header row",
-    )
-    _add_cache(lu)
     lu.add_argument(
         "--max-cache-age",
         type=int,
         default=0,
         metavar="SEC",
-        help="If >0: reuse local member snapshot newer than SEC s (default: 0 = always fetch members live).",
+        help="If >0: reuse local snapshot newer than SEC s (default: 0 = always live).",
     )
     lu.add_argument(
         "--refresh",
@@ -394,14 +339,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=82,
         metavar="N",
-        help="Fuzzy threshold 1–100 for name fallback (default: 82, same as name)",
+        help="Fuzzy threshold 1–100 for name fallback (default: 82)",
     )
     lu.add_argument(
         "--pick",
         type=int,
         default=None,
         metavar="N",
-        help="If several fuzzy matches: use the Nth match (1-based) without prompting",
+        help="If several fuzzy matches: use the Nth match (1-based)",
     )
     lu.add_argument(
         "--output",
@@ -417,8 +362,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_LIST_OUTPUT_TZ,
         metavar="ZONE",
         help=(
-            f"IANA zone for joined_* and last_private_* columns (default: {DEFAULT_LIST_OUTPUT_TZ}, "
-            "US Pacific). Shorthand: PST, PDT, PT. Examples: UTC, Europe/Berlin."
+            f"IANA zone for joined_* and last_private_* columns (default: {DEFAULT_LIST_OUTPUT_TZ}). "
+            "Shorthand: PST, PDT, PT. Examples: UTC, Europe/Berlin."
         ),
     )
 
@@ -437,7 +382,6 @@ def main(argv: list[str] | None = None) -> int:
         "full-rescan": _cmd_full_rescan,
         "show": _cmd_show,
         "name": _cmd_name,
-        "channel-member": _cmd_channel_member,
         "list": _cmd_list,
     }
     return handlers[ns.command](ns)

@@ -3,14 +3,14 @@
 Find dialogs by **title / display name** using phonetic-style matching.
 
 Matches **users**, **bots**, **channels**, **supergroups**, and **basic groups** from the
-**chats** SQLite table (filled on **rescan** / **full-rescan**), plus any user rows
-backfilled from cached 1:1 messages. Russian (Cyrillic) is transliterated (``cyrtranslit``);
-each **word** is scored with ``rapidfuzz.WRatio``. Search is **cache-only** (SQLite); neither
-``name`` nor ``list`` fuzzy fallback scans live Telegram dialogs.
+database (filled on **rescan** / **full-rescan**), plus any user rows
+backfilled from 1:1 messages. Russian (Cyrillic) is transliterated (``cyrtranslit``);
+each **word** is scored with ``rapidfuzz.WRatio``.
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import re
 import sqlite3
 import sys
@@ -18,11 +18,13 @@ from pathlib import Path
 
 import cyrtranslit
 from rapidfuzz import fuzz
+from telethon import utils as tg_utils
+
 from telegram_toolkit.dm_cache import DEFAULT_CACHE, _open_db
 
 _CYRILLIC_RE = re.compile(r"[\u0400-\u052f]")
 
-# Channel-like peers ``list`` may resolve from the same name cache as ``telegram-tk name``.
+# Channel-like peers ``list`` may resolve from the same name database as ``name``.
 LISTABLE_PEER_KINDS = frozenset({"channel", "supergroup", "group"})
 
 
@@ -57,7 +59,7 @@ def _needle_tokens(needle: str) -> list[str]:
 
 
 def _prefix_word_match(nt: str, w: str) -> bool:
-    """Typed query is a prefix of a display word (``mak`` / ``maksim``, ``maks`` / ``maksim``)."""
+    """Typed query is a prefix of a display word."""
     if len(nt) < 3 or len(w) < 3:
         return False
     if len(nt) > len(w):
@@ -137,19 +139,13 @@ def _safe_cell(s: str) -> str:
     return (s or "").replace("\t", " ").replace("\r", " ").replace("\n", " ")
 
 
-def _print_name_results(hits: list[tuple[str, int, str, str]], *, header: bool) -> None:
-    """Space-padded columns (same idea as ``search`` default stdout)."""
+def _print_name_results(hits: list[tuple[str, int, str, str]]) -> None:
+    """Space-padded columns."""
     rows = [(k, str(p), _safe_cell(t), _safe_cell(u)) for k, p, t, u in hits]
     w_kind = max((len("peer_kind"),) + tuple(len(r[0]) for r in rows), default=len("peer_kind"))
     w_id = max((len("peer_id"),) + tuple(len(r[1]) for r in rows), default=len("peer_id"))
     w_title = max((len("title"),) + tuple(len(r[2]) for r in rows), default=len("title"))
     w_user = max((len("username"),) + tuple(len(r[3]) for r in rows), default=len("username"))
-    if header:
-        print(
-            f"{'peer_kind'.ljust(w_kind)} {'peer_id'.ljust(w_id)} "
-            f"{'title'.ljust(w_title)} {'username'.ljust(w_user)}",
-            flush=True,
-        )
     for kind, pid_s, tit, un in rows:
         print(
             f"{kind.ljust(w_kind)} {pid_s.ljust(w_id)} {tit.ljust(w_title)} {un.ljust(w_user)}",
@@ -192,15 +188,20 @@ def name_lookup_hits(
     *,
     min_score: int,
 ) -> list[tuple[str, int, str, str]]:
-    """Score and sort rows the same way as ``telegram-tk name`` (single implementation)."""
+    """Score and sort rows."""
     q = query.strip()
     if not q:
         return []
     hits: list[tuple[str, int, str, str]] = []
     for kind, pid, title, uname in rows:
         lab = _label_for_match(title, uname)
+        # Check title/name label
         if display_name_matches_query(lab, q, min_score=min_score):
             hits.append((kind, pid, title, uname))
+        # Also check username explicitly if not already matched
+        elif uname and q.lower().lstrip("@") == uname.lower():
+            hits.append((kind, pid, title, uname))
+
     hits.sort(
         key=lambda t: (
             -_rank_hit(_label_for_match(t[2], t[3]), q, min_score=min_score),
@@ -218,10 +219,7 @@ def name_search_hits(
     min_score: int,
     channel_id: int | None = None,
 ) -> list[tuple[str, int, str, str]]:
-    """
-    SQLite **chats** name search: same hit list as ``telegram-tk name`` / ``find_in_cache``,
-    without printing. Returns ``[]`` if ``db_path`` is missing (``name`` CLI raises instead).
-    """
+    """SQLite **chats** name search."""
     if not db_path.is_file():
         return []
     conn = _open_db(db_path)
@@ -232,39 +230,8 @@ def name_search_hits(
     return name_lookup_hits(rows, query, min_score=min_score)
 
 
-def resolve_channel_id_from_cache(db_path: Path, identifier: str) -> int | None:
-    """Resolve channel/group ID from cache identifier (@username, ID, or title fragment)."""
-    if not db_path.is_file():
-        return None
-    parsed_id = parse_peer_id_literal_for_chats_lookup(identifier)
-    row: tuple[str, int, str, str] | None = None
-    if parsed_id is not None:
-        # Check if it's a known channel/group
-        row = fetch_listable_chat_row_by_peer_id(db_path, parsed_id)
-
-    if row is None:
-        # Try name search for channel/group
-        hits = name_search_hits(db_path, identifier, min_score=82)
-        listable = [h for h in hits if h[0] in LISTABLE_PEER_KINDS]
-        if listable:
-            row = listable[0]
-
-    if row:
-        kind, pid, _title, _uname = row
-        if kind == "group":
-            return -pid
-        if kind in ("channel", "supergroup"):
-            return -(1000000000000 + pid)
-    return None
-
-
 def parse_peer_id_literal_for_chats_lookup(literal: str) -> int | None:
-    """
-    If ``literal`` is a numeric channel/group id form, return ``chats.peer_id`` for lookup.
-
-    Accepts a plain positive **channel id**, ``-100…`` Bot API style, or a negative **marked**
-    id that ``telethon.utils.resolve_id`` classifies as ``PeerChannel`` / ``PeerChat``.
-    """
+    """If ``literal`` is a numeric channel/group id form, return ``chats.peer_id``."""
     from telethon import utils as tg_utils
     from telethon.tl.types import PeerChannel, PeerChat
 
@@ -291,7 +258,7 @@ def fetch_listable_chat_row_by_peer_id(
     db_path: Path,
     peer_id: int,
 ) -> tuple[str, int, str, str] | None:
-    """Return the single listable ``chats`` row for ``peer_id``, or ``None`` if none / ambiguous."""
+    """Return the single listable ``chats`` row for ``peer_id``."""
     if not db_path.is_file():
         return None
     placeholders = ",".join("?" * len(LISTABLE_PEER_KINDS))
@@ -315,7 +282,7 @@ def fetch_listable_chat_row_by_peer_id(
 
 
 def fetch_chat_rows_by_peer_id(db_path: Path, peer_id: int) -> list[tuple[str, int, str, str]]:
-    """Return all ``chats`` rows with this ``peer_id`` (any ``peer_kind``), sorted for stable output."""
+    """Return all ``chats`` rows with this ``peer_id``."""
     if not db_path.is_file():
         return []
     conn = _open_db(db_path)
@@ -334,77 +301,82 @@ def fetch_chat_rows_by_peer_id(db_path: Path, peer_id: int) -> list[tuple[str, i
         conn.close()
 
 
-def find_in_cache(
+async def find_in_cache(
     db_path: Path,
     query: str,
     *,
-    header: bool,
     min_score: int,
     channel: str | None = None,
+    pick: int | None = None,
 ) -> int:
     if not db_path.is_file():
-        raise SystemExit(f"name: no cache database at {db_path}")
+        raise SystemExit(f"error: no database at {db_path}. Run 'rescan' first.")
     db = db_path.resolve()
 
     channel_id: int | None = None
     if channel:
-        channel_id = resolve_channel_id_from_cache(db, channel)
-        if channel_id is None:
-            raise SystemExit(f"name: could not resolve channel {channel!r} from cache. Run 'telegram-tk list' first to cache members.")
+        from telegram_toolkit.client import make_client
+        from telegram_toolkit.resolver import resolve_listable_entity
+
+        client = make_client()
+        await client.connect()
+        try:
+            entity = await resolve_listable_entity(
+                client,
+                channel,
+                cache_path=db_path,
+                name_min_score=min_score,
+                pick=pick,
+            )
+            channel_id = tg_utils.get_peer_id(entity)
+        finally:
+            await client.disconnect()
 
     parsed_id = parse_peer_id_literal_for_chats_lookup(query)
     if parsed_id is not None:
         id_hits = fetch_chat_rows_by_peer_id(db, parsed_id)
         if channel_id is not None:
-            # Filter id_hits by membership if channel is specified
             conn = _open_db(db)
             try:
-                # We reuse _cache_chat_rows logic by manually filtering or just checking membership
                 member_uids = {r[0] for r in conn.execute("SELECT user_id FROM channel_member_snapshots WHERE channel_id = ?", (channel_id,)).fetchall()}
                 id_hits = [h for h in id_hits if h[1] in member_uids]
             finally:
                 conn.close()
 
         if id_hits:
-            _print_name_results(id_hits, header=header)
+            _print_name_results(id_hits)
             return len(id_hits)
 
     hits = name_search_hits(db, query, min_score=min_score, channel_id=channel_id)
-    _print_name_results(hits, header=header)
+    _print_name_results(hits)
     return len(hits)
 
 
-def run_find_dm_peer(
+async def run_find_dm_peer(
     query: str,
     *,
     cache: Path,
-    header: bool,
     min_score: int,
     channel: str | None = None,
+    pick: int | None = None,
 ) -> int:
     if not (1 <= min_score <= 100):
-        raise SystemExit("name: --min-score must be between 1 and 100")
+        raise SystemExit("error: --min-score must be between 1 and 100")
     q = query.strip()
     if not q:
-        raise SystemExit("name: pass a non-empty name query")
-    return find_in_cache(cache.resolve(), q, header=header, min_score=min_score, channel=channel)
+        raise SystemExit("error: pass a non-empty name query")
+    return await find_in_cache(cache.resolve(), q, min_score=min_score, channel=channel, pick=pick)
 
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Find chats by title / name or peer id (users, channels, groups; phonetic / fuzzy).",
+        description="Find chats by title / name, username or peer id (phonetic / fuzzy).",
     )
     p.add_argument(
         "name",
         nargs="+",
         metavar="TEXT",
-        help="Name fragment, or numeric / -100… / marked id (shows peer_id and title from cache)",
-    )
-    p.add_argument(
-        "--cache",
-        type=Path,
-        default=DEFAULT_CACHE,
-        help=f"SQLite path (default: {DEFAULT_CACHE})",
+        help="Name fragment, username, or numeric ID.",
     )
     p.add_argument(
         "--min-score",
@@ -414,17 +386,27 @@ def main() -> None:
         help="rapidfuzz WRatio threshold per word (1–100; default: 82)",
     )
     p.add_argument(
-        "--header",
-        action="store_true",
-        help="Print TSV header row",
+        "--channel",
+        metavar="CHANNEL",
+        help="Limit search to members of this channel (requires cached members)",
+    )
+    p.add_argument(
+        "--pick",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When several fuzzy matches for --channel: use the Nth row (1-based) without prompting",
     )
     args = p.parse_args()
     q = " ".join(args.name).strip()
-    run_find_dm_peer(
-        q,
-        cache=args.cache,
-        header=args.header,
-        min_score=args.min_score,
+    asyncio.run(
+        run_find_dm_peer(
+            q,
+            cache=DEFAULT_CACHE,
+            min_score=args.min_score,
+            channel=args.channel,
+            pick=args.pick,
+        )
     )
 
 

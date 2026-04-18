@@ -1,4 +1,4 @@
-"""``python -m telegram_toolkit`` → same as ``telegram-tk`` (including legacy bare-query)."""
+"""``python -m telegram_toolkit`` → same as ``telegram-tk``."""
 from __future__ import annotations
 
 import sys
@@ -14,7 +14,6 @@ _SUBCOMMANDS = frozenset(
         "full-rescan",
         "show",
         "name",
-        "channel-member",
         "list",
     }
 )
@@ -22,8 +21,6 @@ _SUBCOMMANDS = frozenset(
 
 def main() -> int:
     argv = sys.argv[1:]
-    # If no arguments or first argument is not a subcommand, argparse will handle it.
-    # We removed the legacy "default to search" logic as requested.
     return cli_main(argv)
 
 
