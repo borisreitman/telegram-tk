@@ -74,6 +74,9 @@ Run full scan to initialize local database stored in `.cache` folder. It's an SQ
 ```bash
 telegram-tk full-scan
 ```
+
+All search commands work against the data previously downloaded. If you want to grab new data, remember to `rescan`.
+
 ### Usage Synopsis
 
 ```bash
