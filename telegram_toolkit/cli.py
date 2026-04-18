@@ -21,6 +21,7 @@ from telegram_toolkit.dm_cache import (  # noqa: E402
     _CacheTraceLive,
     _TracePeerSummary,
 )
+from telegram_toolkit.list_users import DEFAULT_LIST_OUTPUT_TZ  # noqa: E402
 
 
 async def run_auth() -> None:
@@ -177,6 +178,7 @@ def _cmd_list(ns: argparse.Namespace) -> int:
             name_min_score=ns.min_score,
             pick=ns.pick,
             output=ns.output,
+            output_tz=ns.tz,
         )
     )
     return 0
@@ -392,6 +394,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help="Write UTF-8 comma-separated CSV to this file instead of TSV to stdout",
+    )
+    lu.add_argument(
+        "--tz",
+        type=str,
+        default=DEFAULT_LIST_OUTPUT_TZ,
+        metavar="ZONE",
+        help=(
+            f"IANA zone for joined_* and last_private_* columns (default: {DEFAULT_LIST_OUTPUT_TZ}, "
+            "US Pacific). Shorthand: PST, PDT, PT. Examples: UTC, Europe/Berlin."
+        ),
     )
 
     return p

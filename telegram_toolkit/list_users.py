@@ -7,7 +7,9 @@ Rows are sorted by **join date** (from Telethon ``user.participant.date`` when p
 then by ``user_id``. ``ChannelParticipantCreator`` / ``ChatParticipantCreator`` have no
 join date and sort first. Rows without a usable date sort last.
 
-Columns: user_id, username, first_name, last_name, joined_date, joined_time (UTC; empty if unknown)
+Columns: user_id, username, first_name, last_name, joined_date, joined_time,
+last_private_date, last_private_time (same output time zone, default US Pacific ``America/Los_Angeles``;
+empty when join time or private cache is unknown). Use ``--tz`` for an IANA zone (``UTC``, ``Europe/Berlin``, …).
 
 **Resolving CHANNEL**: (1) numeric **peer id** — ``chats`` exact match, else ``get_entity``
 on ``-100…`` / ``-id`` forms; (2) otherwise **same** SQLite fuzzy search as
@@ -32,8 +34,10 @@ import asyncio
 import csv
 import sqlite3
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telethon import utils
 from telethon.errors.rpcerrorlist import ChatAdminRequiredError
@@ -48,6 +52,54 @@ from telegram_toolkit.find_dm_peer import (
     name_search_hits,
     parse_peer_id_literal_for_chats_lookup,
 )
+
+# US Pacific (PST/PDT via DST rules). IANA name is the portable default.
+DEFAULT_LIST_OUTPUT_TZ = "America/Los_Angeles"
+
+
+def _normalize_tz_name(name: str) -> str:
+    s = (name or "").strip()
+    if not s:
+        return DEFAULT_LIST_OUTPUT_TZ
+    u = s.upper().replace(" ", "_")
+    if u in ("PST", "PDT", "PT"):
+        return "America/Los_Angeles"
+    return s.strip()
+
+
+def _resolve_output_tz(name: str) -> ZoneInfo:
+    key = _normalize_tz_name(name)
+    try:
+        return ZoneInfo(key)
+    except ZoneInfoNotFoundError:
+        raise SystemExit(
+            f"list: unknown time zone {name!r} (resolved {key!r}). "
+            "Use an IANA name, e.g. America/Los_Angeles, UTC, Europe/London. "
+            "Shorthand accepted: PST, PDT, PT → America/Los_Angeles."
+        ) from None
+
+
+def _parse_stored_iso_to_utc(iso: str) -> datetime | None:
+    """Parse ISO strings from Telethon / SQLite into aware UTC, or ``None`` if missing / invalid."""
+    s = (iso or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_iso_local_date_time(iso: str, tz: ZoneInfo) -> tuple[str, str]:
+    """Date and time strings in ``tz`` for a stored UTC instant, or empty pair."""
+    dt = _parse_stored_iso_to_utc(iso)
+    if dt is None:
+        return ("", "")
+    local = dt.astimezone(tz)
+    return (local.strftime("%Y-%m-%d"), local.strftime("%H:%M:%S"))
 
 
 def _participant_join(user: User) -> tuple[datetime, str]:
@@ -78,23 +130,25 @@ def _sort_bucket(jd: datetime) -> int:
     return 1
 
 
-def _split_joined_utc_cell(iso: str) -> tuple[str, str]:
-    """Split stored ISO ``joined_utc`` into UTC date and time for TSV/CSV output."""
-    s = (iso or "").strip()
-    if not s:
-        return ("", "")
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
-        if "T" in s:
-            d, rest = s.split("T", 1)
-            return (d, rest.split("+", 1)[0].rstrip("Z") if rest else "")
-        return (s, "")
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return (dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M:%S"))
+def _fetch_max_private_dm_iso_by_peer(conn: sqlite3.Connection) -> dict[int, str]:
+    """
+    For each ``peer_user_id`` in ``messages``, the newest ``date_utc`` (ISO) among non-deleted peers.
+    Used to correlate channel members with the local 1:1 message cache from **rescan** / **full-rescan**.
+    """
+    cur = conn.execute(
+        """
+        SELECT m.peer_user_id, MAX(m.date_utc)
+        FROM messages m
+        WHERE m.peer_user_id NOT IN (SELECT peer_user_id FROM deleted_peers)
+        GROUP BY m.peer_user_id
+        """
+    )
+    out: dict[int, str] = {}
+    for uid, dt in cur.fetchall():
+        s = (dt or "").strip()
+        if s:
+            out[int(uid)] = s
+    return out
 
 
 def _meta_fresh(fetched_at_utc: str, max_age_sec: int) -> bool:
@@ -147,7 +201,16 @@ def _replace_snapshot(
     )
 
 
-_MEMBER_COLUMNS = ["user_id", "username", "first_name", "last_name", "joined_date", "joined_time"]
+_MEMBER_COLUMNS = [
+    "user_id",
+    "username",
+    "first_name",
+    "last_name",
+    "joined_date",
+    "joined_time",
+    "last_private_date",
+    "last_private_time",
+]
 
 
 def _write_member_rows(
@@ -156,8 +219,11 @@ def _write_member_rows(
     header: bool,
     *,
     output: Path | None,
+    display_tz: ZoneInfo,
+    last_private_iso_by_user: Mapping[int, str] | None = None,
 ) -> int:
     """Write member rows to stdout (TSV) or to ``output`` (UTF-8 CSV). Returns data row count."""
+    dm_map = last_private_iso_by_user or {}
     if limit is not None:
         rows = rows[:limit]
     n = 0
@@ -166,8 +232,9 @@ def _write_member_rows(
         if header:
             w.writerow(_MEMBER_COLUMNS)
         for uid, un, fn, ln, joined in rows:
-            jd, jt = _split_joined_utc_cell(joined)
-            w.writerow([uid, un, fn, ln, jd, jt])
+            jd, jt = _format_iso_local_date_time(joined, display_tz)
+            lp_d, lp_t = _format_iso_local_date_time(dm_map.get(int(uid), ""), display_tz)
+            w.writerow([uid, un, fn, ln, jd, jt, lp_d, lp_t])
             n += 1
             if n % 5000 == 0:
                 sys.stdout.flush()
@@ -179,8 +246,9 @@ def _write_member_rows(
         if header:
             w.writerow(_MEMBER_COLUMNS)
         for uid, un, fn, ln, joined in rows:
-            jd, jt = _split_joined_utc_cell(joined)
-            w.writerow([uid, un, fn, ln, jd, jt])
+            jd, jt = _format_iso_local_date_time(joined, display_tz)
+            lp_d, lp_t = _format_iso_local_date_time(dm_map.get(int(uid), ""), display_tz)
+            w.writerow([uid, un, fn, ln, jd, jt, lp_d, lp_t])
             n += 1
     return n
 
@@ -319,9 +387,11 @@ async def run(
     name_min_score: int = 82,
     pick: int | None = None,
     output: Path | None = None,
+    output_tz: str = DEFAULT_LIST_OUTPUT_TZ,
 ) -> None:
     if not (1 <= name_min_score <= 100):
         raise SystemExit("list: --min-score must be between 1 and 100")
+    display_tz = _resolve_output_tz(output_tz)
     cache_path = cache_db or DEFAULT_CACHE
     client = make_client()
     await client.connect()
@@ -352,12 +422,15 @@ async def run(
                             f"({len(snap)} rows, --refresh to refetch)",
                             file=sys.stderr,
                         )
+                    last_dm = _fetch_max_private_dm_iso_by_peer(conn)
                     await client.disconnect()
                     n = _write_member_rows(
                         [(r[0], r[1] or "", r[2] or "", r[3] or "", r[4]) for r in snap],
                         limit,
                         header,
                         output=output,
+                        display_tz=display_tz,
+                        last_private_iso_by_user=last_dm,
                     )
                     if output is not None and sys.stderr.isatty():
                         print(f"# list: wrote {n} rows to {output}", file=sys.stderr)
@@ -397,6 +470,7 @@ async def run(
 
     conn = _open_db(cache_path)
     try:
+        last_dm = _fetch_max_private_dm_iso_by_peer(conn)
         _replace_snapshot(conn, channel_id, flat)
         conn.commit()
     finally:
@@ -407,6 +481,8 @@ async def run(
         limit,
         header,
         output=output,
+        display_tz=display_tz,
+        last_private_iso_by_user=last_dm,
     )
     if output is not None and sys.stderr.isatty():
         print(f"# list: wrote {n} rows to {output}", file=sys.stderr)
@@ -414,7 +490,10 @@ async def run(
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="List members of a channel or megagroup (TSV to stdout, or CSV with --output)."
+        description=(
+            "List members of a channel or megagroup (TSV to stdout, or CSV with --output). "
+            "Adds last-private-chat time from the local messages cache (same DB as rescan)."
+        )
     )
     p.add_argument(
         "channel",
@@ -468,6 +547,16 @@ def main() -> None:
         metavar="PATH",
         help="Write UTF-8 comma-separated CSV to this file instead of TSV to stdout",
     )
+    p.add_argument(
+        "--tz",
+        type=str,
+        default=DEFAULT_LIST_OUTPUT_TZ,
+        metavar="ZONE",
+        help=(
+            f"IANA time zone for joined_* and last_private_* columns (default: {DEFAULT_LIST_OUTPUT_TZ}, "
+            "US Pacific). Shorthand: PST, PDT, PT → same. Examples: UTC, Europe/Berlin."
+        ),
+    )
     args = p.parse_args()
     asyncio.run(
         run(
@@ -480,6 +569,7 @@ def main() -> None:
             name_min_score=args.min_score,
             pick=args.pick,
             output=args.output,
+            output_tz=args.tz,
         )
     )
 

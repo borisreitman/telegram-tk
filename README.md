@@ -44,7 +44,7 @@ Run repo tools from the **repository root** so imports and default paths resolve
 | **`show`** *USER_ID* | Print cache + Telethon `get_entity` info for one numeric user id. Flags: `--cache`, `--notrace`. |
 | **`name`** *TEXT…* | Find dialogs by **title / display name** (not message text). Uses the **`chats`** table (SQLite only; filled by **rescan** / **full-rescan** as above). Cyrillic → Latin, then **per-word** **rapidfuzz.WRatio** (default **82**) plus prefix / substring rules. Stdout: **space-padded** columns **`peer_kind`**, **`peer_id`**, **`title`**, **`username`**. Flags: `--cache`, `--min-score`, `--header`. |
 | **`channel-member`** *CHANNEL* | For each **`--id`** / **`--file`** / stdin user id, prints TSV **`user_id`**, **`member`** (`0`/`1`) using **`get_permissions`**. Flags: **`--no-header`**, **`--ok-if-not-member`** (exit 0 even if some ids are not members). Exit **1** if any id is not a member (unless overridden); **2** on admin / RPC errors. |
-| **`list`** *CHANNEL* | List **every member** of a channel or megagroup (Telethon **`iter_participants`**). **CHANNEL** can be **`@username`**, id, or a **title fragment** resolved like **`name`** from **`chats`**. TSV/CSV: **`user_id`**, **`username`**, **`first_name`**, **`last_name`**, **`joined_date`**, **`joined_time`** (UTC; empty when join time unknown). Flags include **`--output`**, **`--min-score`**, **`--pick`**, **`--max-cache-age`**, **`--refresh`**, **`--limit`**, **`--no-header`**. |
+| **`list`** *CHANNEL* | List **every member** of a channel or megagroup (Telethon **`iter_participants`**). **CHANNEL** can be **`@username`**, id, or a **title fragment** resolved like **`name`** from **`chats`**. TSV/CSV: **`user_id`**, **`username`**, **`first_name`**, **`last_name`**, **`joined_date`**, **`joined_time`**, **`last_private_date`**, **`last_private_time`** (all in one output time zone; **default `America/Los_Angeles`** US Pacific via **`--tz`**; **`PST`** / **`PDT`** / **`PT`** accepted as that zone). **`last_private_*`** uses the newest cached **1:1** row in **`messages`** (same DB as **rescan**); empty if unknown. Flags include **`--output`**, **`--tz`**, **`--min-score`**, **`--pick`**, **`--max-cache-age`**, **`--refresh`**, **`--limit`**, **`--no-header`**. |
 
 **Typical use:** `telegram-tk rescan` then `telegram-tk search "keyword"`.
 
@@ -112,7 +112,7 @@ Each module is runnable with **`python -m telegram_toolkit.<module>`** from the 
 
 ### `list_users`
 
-TSV: `user_id`, `username`, `first_name`, `last_name`, `joined_date`, `joined_time` (UTC; sorted by join time when available). Same behaviour as **`telegram-tk list`**.
+TSV: `user_id`, `username`, `first_name`, `last_name`, `joined_date`, `joined_time`, `last_private_date`, `last_private_time` (default Pacific `America/Los_Angeles`, override with **`--tz`**; last-private from local DM cache; sorted by join time when available). Same behaviour as **`telegram-tk list`**.
 
 ```bash
 ./telegram-tk list @ChannelName
