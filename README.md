@@ -90,7 +90,7 @@ If you want to limit name search to member of a channel you have admin rights to
 telegram-tk name Aleks --channel <channel>
 ```
 
-Any command that accepts channel, can take the internal telegram ID of the channel, it's @foo it has one, or match by name. If more than one matches, you will be prompted to select one of them.
+Any command that accepts channel, can take the internal telegram ID of the channel, it's @foo "username" if it has one, or partial name. If more than one matches, you will be prompted to select one of channels.
 
 ### Finding people by text
 
