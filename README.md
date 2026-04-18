@@ -1,6 +1,6 @@
 # Telegram Toolkit by Boris Reitman
 
-This tool is oriented to people who run channels on Telegram, and have a lot of users that they need to manage.
+This tool is designed for people who run their own channels on Telegram, and have a lot of users that they need to manage, paricularly cold outreach to many people in DMs.
 
 ## Setup
 
