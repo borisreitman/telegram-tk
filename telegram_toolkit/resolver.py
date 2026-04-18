@@ -11,6 +11,7 @@ from telegram_toolkit.find_dm_peer import (
     LISTABLE_PEER_KINDS,
     _label_for_match,
     fetch_listable_chat_row_by_peer_id,
+    fetch_listable_chat_row_by_username,
     name_search_hits,
     parse_peer_id_literal_for_chats_lookup,
 )
@@ -91,6 +92,9 @@ async def resolve_listable_entity(
     parsed_id = parse_peer_id_literal_for_chats_lookup(raw)
     if parsed_id is not None:
         row = fetch_listable_chat_row_by_peer_id(resolved_cache, parsed_id)
+
+    if row is None:
+        row = fetch_listable_chat_row_by_username(resolved_cache, raw)
 
     if row is None:
         all_hits = name_search_hits(resolved_cache, raw, min_score=name_min_score)

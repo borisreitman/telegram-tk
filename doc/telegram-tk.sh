@@ -15,17 +15,20 @@ set -euo pipefail
 
 : "${TELEGRAM_TK_REPO:=${HOME}/work/telegram}"
 
-cd "${TELEGRAM_TK_REPO}" || {
-  echo "telegram-tk.sh: cannot cd to TELEGRAM_TK_REPO=${TELEGRAM_TK_REPO}" >&2
-  exit 1
-}
-
-if [[ ! -f .venv/bin/activate ]]; then
-  echo "telegram-tk.sh: missing .venv in ${TELEGRAM_TK_REPO}" >&2
+if [[ ! -d "${TELEGRAM_TK_REPO}" ]]; then
+  echo "telegram-tk: TELEGRAM_TK_REPO=${TELEGRAM_TK_REPO} does not exist" >&2
   exit 1
 fi
 
-# shellcheck source=/dev/null
-source .venv/bin/activate
+VENV_PYTHON="${TELEGRAM_TK_REPO}/.venv/bin/python"
 
-exec python -m telegram_toolkit "$@"
+if [[ ! -f "${VENV_PYTHON}" ]]; then
+  echo "telegram-tk: missing .venv python in ${TELEGRAM_TK_REPO}" >&2
+  exit 1
+fi
+
+# Run with PYTHONPATH set to the repo root so we can find telegram_toolkit
+# while keeping the user's CWD for relative paths in arguments.
+export PYTHONPATH="${TELEGRAM_TK_REPO}:${PYTHONPATH:-}"
+
+exec "${VENV_PYTHON}" -m telegram_toolkit "$@"

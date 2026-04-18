@@ -56,3 +56,13 @@ The `resolver.py` module provides a unified way to turn a user-provided string (
 
 ### Synchronization (`rescan`)
 Walks the Telegram dialog list, updates metadata in the `chats` table, and syncs new 1:1 messages into the `messages` table for recent conversations.
+
+## Path Resolution
+
+To support running the toolkit from any working directory, paths are resolved as follows:
+
+- **Code & Environment**: The toolkit uses `REPO_ROOT` (derived from the package location) to locate `.env` and the Python virtual environment.
+- **Data & Sessions**:
+  - **Database**: Defaults to `${REPO_ROOT}/.cache/private_dm_messages.sqlite`.
+  - **Sessions**: Default to `${REPO_ROOT}/telegram_session.session`. This ensures that authentication state is shared across all call locations.
+- **User Input/Output**: Relative paths provided as command-line arguments (e.g., `--output members.csv` or `--file ids.txt`) are resolved against the **Current Working Directory**, allowing for natural CLI usage.

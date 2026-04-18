@@ -281,6 +281,36 @@ def fetch_listable_chat_row_by_peer_id(
     return (str(r[0]), int(r[1]), (r[2] or "").strip(), (r[3] or "").strip())
 
 
+def fetch_listable_chat_row_by_username(
+    db_path: Path,
+    username: str,
+) -> tuple[str, int, str, str] | None:
+    """Return the single listable ``chats`` row for an exact username match."""
+    if not db_path.is_file():
+        return None
+    u = username.strip().lstrip("@")
+    if not u:
+        return None
+    placeholders = ",".join("?" * len(LISTABLE_PEER_KINDS))
+    kinds_tuple = tuple(LISTABLE_PEER_KINDS)
+    conn = _open_db(db_path)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT peer_kind, peer_id, COALESCE(title, ''), COALESCE(username, '')
+            FROM chats
+            WHERE username = ? COLLATE NOCASE AND peer_kind IN ({placeholders})
+            """,
+            (u,) + kinds_tuple,
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) != 1:
+        return None
+    r = rows[0]
+    return (str(r[0]), int(r[1]), (r[2] or "").strip(), (r[3] or "").strip())
+
+
 def fetch_chat_rows_by_peer_id(db_path: Path, peer_id: int) -> list[tuple[str, int, str, str]]:
     """Return all ``chats`` rows with this ``peer_id``."""
     if not db_path.is_file():

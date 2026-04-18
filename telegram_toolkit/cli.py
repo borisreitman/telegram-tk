@@ -38,8 +38,17 @@ def _cmd_auth(_ns: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_help(_ns: argparse.Namespace) -> int:
-    build_parser().print_help()
+def _cmd_help(ns: argparse.Namespace) -> int:
+    p = build_parser()
+    if ns.subcommand:
+        # We need to find the subparser for the requested command
+        # argparse doesn't make this trivial, so we use the trick of passing --help to the sub-command
+        try:
+            p.parse_args([ns.subcommand, "--help"])
+        except SystemExit:
+            pass
+    else:
+        p.print_help()
     return 0
 
 
@@ -189,9 +198,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Interactive Telegram login (creates/updates the .session file)",
     )
 
-    sub.add_parser(
+    hp = sub.add_parser(
         "help",
-        help="Show this help message and exit",
+        help="Show help for a command",
+    )
+    hp.add_argument(
+        "subcommand",
+        nargs="?",
+        help="The command to show help for",
     )
 
     sp = sub.add_parser("search", help="Search private message text")
