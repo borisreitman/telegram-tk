@@ -5,8 +5,25 @@ This tool is designed for people who run their own channels on Telegram, and hav
 ## Setup
 
 
+### Download
+
+These instructions are for MacOS users. For Windows, adjust as necessary. This is a Python based tool.
+First clone the repo. The checkout folder will be actually used by the app, there's no system wide install.
+
+```
+git clone https://github.com/borisreitman/telegram-tk.git telegram-tk
+```
+
+Then enter the folder you checkout out:
+
+```
+cd telegram-tk
+```
+
+
 ### Install dependencies
-1. Create a venv at `.venv/`:
+
+Inside the folder where you checkoud out `telegram-tk`, create and initialize virtual Python environment:
 
 ```bash
 python3 -m venv .venv
