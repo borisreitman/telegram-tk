@@ -1,5 +1,7 @@
 # Telegram Toolkit by Boris Reitman
 
+This tool is oriented to people who run channels on Telegram, and have a lot of users that they need to manage.
+
 ## Setup
 
 
@@ -82,6 +84,14 @@ It will do a similarity search, so you search for "aleks" it will find "Alex" an
 
 Once you have user id of the person or channel, you can plug it into other commands like `list`. But, other commands too will 
 
+If you want to limit name search to member of a channel you have admin rights to, you can do:
+
+```
+telegram-tk name Aleks --channel <channel>
+```
+
+Any command that accepts channel, can take the internal telegram ID of the channel, it's @foo it has one, or match by name. If more than one matches, you will be prompted to select one of them.
+
 ### Finding people by text
 
 Sometimes you can't remember the name of the person you discussed something with. So, you can search the 1-on-1 chat text, to find him. In the following example, you will find all peolpe with whom you discussed patents.
@@ -89,6 +99,17 @@ Sometimes you can't remember the name of the person you discussed something with
 ```
 telegram-tk search patent
 ```
+
+### Listing users in channels
+
+This is implemented only for channels that you have admin rights to.
+
+```
+telegram-tk list <channel> --output members.csv
+```
+
+If you don't specify the output target, it will be output to console.
+
 
 
 ## Security
