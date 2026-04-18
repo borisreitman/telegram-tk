@@ -167,18 +167,22 @@ def _label_for_match(title: str, username: str) -> str:
     return t or u
 
 
-def _cache_chat_rows(conn: sqlite3.Connection) -> list[tuple[str, int, str, str]]:
+def _cache_chat_rows(conn: sqlite3.Connection, *, channel_id: int | None = None) -> list[tuple[str, int, str, str]]:
     """Rows: peer_kind, peer_id, title, username (username without @ in DB)."""
-    cur = conn.execute(
-        """
+    sql = """
         SELECT c.peer_kind, c.peer_id, COALESCE(c.title, ''), COALESCE(c.username, '')
         FROM chats c
         WHERE NOT (
             c.peer_kind IN ('user', 'bot')
             AND c.peer_id IN (SELECT peer_user_id FROM deleted_peers)
         )
-        """
-    )
+    """
+    params = []
+    if channel_id is not None:
+        sql += " AND c.peer_id IN (SELECT user_id FROM channel_member_snapshots WHERE channel_id = ?)"
+        params.append(channel_id)
+
+    cur = conn.execute(sql, params)
     return [(str(r[0]), int(r[1]), (r[2] or "").strip(), (r[3] or "").strip()) for r in cur.fetchall()]
 
 
@@ -212,6 +216,7 @@ def name_search_hits(
     query: str,
     *,
     min_score: int,
+    channel_id: int | None = None,
 ) -> list[tuple[str, int, str, str]]:
     """
     SQLite **chats** name search: same hit list as ``telegram-tk name`` / ``find_in_cache``,
@@ -221,10 +226,36 @@ def name_search_hits(
         return []
     conn = _open_db(db_path)
     try:
-        rows = _cache_chat_rows(conn)
+        rows = _cache_chat_rows(conn, channel_id=channel_id)
     finally:
         conn.close()
     return name_lookup_hits(rows, query, min_score=min_score)
+
+
+def resolve_channel_id_from_cache(db_path: Path, identifier: str) -> int | None:
+    """Resolve channel/group ID from cache identifier (@username, ID, or title fragment)."""
+    if not db_path.is_file():
+        return None
+    parsed_id = parse_peer_id_literal_for_chats_lookup(identifier)
+    row: tuple[str, int, str, str] | None = None
+    if parsed_id is not None:
+        # Check if it's a known channel/group
+        row = fetch_listable_chat_row_by_peer_id(db_path, parsed_id)
+
+    if row is None:
+        # Try name search for channel/group
+        hits = name_search_hits(db_path, identifier, min_score=82)
+        listable = [h for h in hits if h[0] in LISTABLE_PEER_KINDS]
+        if listable:
+            row = listable[0]
+
+    if row:
+        kind, pid, _title, _uname = row
+        if kind == "group":
+            return -pid
+        if kind in ("channel", "supergroup"):
+            return -(1000000000000 + pid)
+    return None
 
 
 def parse_peer_id_literal_for_chats_lookup(literal: str) -> int | None:
@@ -309,17 +340,36 @@ def find_in_cache(
     *,
     header: bool,
     min_score: int,
+    channel: str | None = None,
 ) -> int:
     if not db_path.is_file():
         raise SystemExit(f"name: no cache database at {db_path}")
     db = db_path.resolve()
+
+    channel_id: int | None = None
+    if channel:
+        channel_id = resolve_channel_id_from_cache(db, channel)
+        if channel_id is None:
+            raise SystemExit(f"name: could not resolve channel {channel!r} from cache. Run 'telegram-tk list' first to cache members.")
+
     parsed_id = parse_peer_id_literal_for_chats_lookup(query)
     if parsed_id is not None:
         id_hits = fetch_chat_rows_by_peer_id(db, parsed_id)
+        if channel_id is not None:
+            # Filter id_hits by membership if channel is specified
+            conn = _open_db(db)
+            try:
+                # We reuse _cache_chat_rows logic by manually filtering or just checking membership
+                member_uids = {r[0] for r in conn.execute("SELECT user_id FROM channel_member_snapshots WHERE channel_id = ?", (channel_id,)).fetchall()}
+                id_hits = [h for h in id_hits if h[1] in member_uids]
+            finally:
+                conn.close()
+
         if id_hits:
             _print_name_results(id_hits, header=header)
             return len(id_hits)
-    hits = name_search_hits(db, query, min_score=min_score)
+
+    hits = name_search_hits(db, query, min_score=min_score, channel_id=channel_id)
     _print_name_results(hits, header=header)
     return len(hits)
 
@@ -330,13 +380,14 @@ def run_find_dm_peer(
     cache: Path,
     header: bool,
     min_score: int,
+    channel: str | None = None,
 ) -> int:
     if not (1 <= min_score <= 100):
         raise SystemExit("name: --min-score must be between 1 and 100")
     q = query.strip()
     if not q:
         raise SystemExit("name: pass a non-empty name query")
-    return find_in_cache(cache.resolve(), q, header=header, min_score=min_score)
+    return find_in_cache(cache.resolve(), q, header=header, min_score=min_score, channel=channel)
 
 
 def main() -> None:

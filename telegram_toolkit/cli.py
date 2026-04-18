@@ -38,6 +38,11 @@ def _cmd_auth(_ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_help(_ns: argparse.Namespace) -> int:
+    build_parser().print_help()
+    return 0
+
+
 def _add_cache(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--cache",
@@ -152,6 +157,7 @@ def _cmd_name(ns: argparse.Namespace) -> int:
         cache=ns.cache,
         header=ns.header,
         min_score=ns.min_score,
+        channel=ns.channel,
     )
 
 
@@ -194,6 +200,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "auth",
         help="Interactive Telegram login (creates/updates the .session file)",
+    )
+
+    sub.add_parser(
+        "help",
+        help="Show this help message and exit",
     )
 
     sp = sub.add_parser("search", help="Search cached private message text (no Telegram I/O)")
@@ -310,6 +321,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print TSV header row",
     )
+    fdp.add_argument(
+        "--channel",
+        metavar="CHANNEL",
+        help="Limit search to members of this channel (requires channel-member snapshots in cache)",
+    )
 
     cm = sub.add_parser(
         "channel-member",
@@ -415,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
     ns = p.parse_args(argv)
     handlers: dict[str, Callable[[argparse.Namespace], int]] = {
         "auth": _cmd_auth,
+        "help": _cmd_help,
         "search": _cmd_search,
         "rescan": _cmd_rescan,
         "full-rescan": _cmd_full_rescan,

@@ -8,6 +8,7 @@ from telegram_toolkit.cli import main as cli_main
 _SUBCOMMANDS = frozenset(
     {
         "auth",
+        "help",
         "search",
         "rescan",
         "full-rescan",
@@ -21,10 +22,8 @@ _SUBCOMMANDS = frozenset(
 
 def main() -> int:
     argv = sys.argv[1:]
-    if len(argv) == 1 and argv[0] in ("-h", "--help"):
-        return cli_main(argv)
-    if argv and argv[0] not in _SUBCOMMANDS:
-        argv = ["search", *argv]
+    # If no arguments or first argument is not a subcommand, argparse will handle it.
+    # We removed the legacy "default to search" logic as requested.
     return cli_main(argv)
 
 
