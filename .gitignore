@@ -2,3 +2,4 @@
 *.session
 *.session-journal
 .env
+.cache/

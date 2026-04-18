@@ -5,30 +5,18 @@ Ban (remove) users from a channel or megagroup. Requires admin + ban users right
 User IDs: one per line on stdin, or --file, or repeated --id.
 
 Examples:
-  echo 123456 | .venv/bin/python scripts/tg_delete_users.py @mychannel --dry-run
-  .venv/bin/python scripts/tg_delete_users.py @mychannel --yes --file ids.txt
-  grep -i spam users.tsv | cut -f1 | .venv/bin/python scripts/tg_delete_users.py @mychannel --yes
+  echo 123456 | .venv/bin/python -m telegram_toolkit.delete_users @mychannel --dry-run
+  .venv/bin/python -m telegram_toolkit.delete_users @mychannel --yes --file ids.txt
+  grep -i spam users.tsv | cut -f1 | .venv/bin/python -m telegram_toolkit.delete_users @mychannel --yes
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 from pathlib import Path
 
-_repo_root = Path(__file__).resolve().parent.parent
-_env = _repo_root / ".env"
-if _env.is_file():
-    for line in _env.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, _, v = line.partition("=")
-            k, v = k.strip(), v.strip().strip('"').strip("'")
-            if k and k not in os.environ:
-                os.environ[k] = v
-
-from tg_client import make_client
+from telegram_toolkit.client import make_client
 
 
 def _parse_ids(args: argparse.Namespace) -> list[int]:
@@ -72,7 +60,7 @@ async def run(channel: str, user_ids: list[int], dry_run: bool, yes: bool) -> No
     client = make_client()
     await client.connect()
     if not await client.is_user_authorized():
-        raise SystemExit("Not authorized. Run: .venv/bin/python scripts/tg_auth.py")
+        raise SystemExit("Not authorized. Run: .venv/bin/python -m telegram_toolkit auth")
     entity = await client.get_entity(channel)
 
     for uid in user_ids:
