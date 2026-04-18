@@ -202,41 +202,55 @@ _MEMBER_COLUMNS = [
 def _write_member_rows(
     rows: list[tuple[int, str, str, str, str]],
     limit: int | None,
-    header: bool = False,
+    header: bool = True,
     *,
     output: Path | None,
     display_tz: ZoneInfo,
     last_private_iso_by_user: Mapping[int, str] | None = None,
 ) -> int:
-    """Write member rows to stdout (TSV) or to ``output`` (UTF-8 CSV). Returns data row count."""
+    """Write member rows to stdout (Aligned Table) or to ``output`` (UTF-8 CSV). Returns data row count."""
     dm_map = last_private_iso_by_user or {}
     if limit is not None:
         rows = rows[:limit]
-    n = 0
+
+    # Pre-format rows and calculate column widths
+    formatted_rows = []
+    for uid, un, fn, ln, joined in rows:
+        jd, jt = _format_iso_local_date_time(joined, display_tz)
+        lp_d, lp_t = _format_iso_local_date_time(dm_map.get(int(uid), ""), display_tz)
+        formatted_rows.append([str(uid), un or "", fn or "", ln or "", jd, jt, lp_d, lp_t])
+
     if output is None:
-        w = csv.writer(sys.stdout, delimiter="\t", lineterminator="\n")
+        if not formatted_rows:
+            return 0
+        
+        # Calculate max width for each column
+        col_count = len(_MEMBER_COLUMNS)
+        widths = [len(h) for h in _MEMBER_COLUMNS]
+        for row in formatted_rows:
+            for i in range(col_count):
+                widths[i] = max(widths[i], len(row[i]))
+
+        # Render aligned table
         if header:
-            w.writerow(_MEMBER_COLUMNS)
-        for uid, un, fn, ln, joined in rows:
-            jd, jt = _format_iso_local_date_time(joined, display_tz)
-            lp_d, lp_t = _format_iso_local_date_time(dm_map.get(int(uid), ""), display_tz)
-            w.writerow([uid, un, fn, ln, jd, jt, lp_d, lp_t])
-            n += 1
-            if n % 5000 == 0:
-                sys.stdout.flush()
-        sys.stdout.flush()
-        return n
+            header_line = " ".join(h.ljust(widths[i]) for i, h in enumerate(_MEMBER_COLUMNS))
+            print(header_line, flush=True)
+        
+        for row in formatted_rows:
+            line = " ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
+            print(line, flush=True)
+        
+        return len(formatted_rows)
+
+    # File output (CSV)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         if header:
             w.writerow(_MEMBER_COLUMNS)
-        for uid, un, fn, ln, joined in rows:
-            jd, jt = _format_iso_local_date_time(joined, display_tz)
-            lp_d, lp_t = _format_iso_local_date_time(dm_map.get(int(uid), ""), display_tz)
-            w.writerow([uid, un, fn, ln, jd, jt, lp_d, lp_t])
-            n += 1
-    return n
+        for row in formatted_rows:
+            w.writerow(row)
+    return len(formatted_rows)
 
 
 async def run(
@@ -416,6 +430,7 @@ def main() -> None:
         run(
             args.channel,
             args.limit,
+            header=True,
             cache_db=None,
             max_cache_age_sec=args.max_cache_age,
             refresh=args.refresh,

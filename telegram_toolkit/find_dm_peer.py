@@ -377,6 +377,31 @@ async def find_in_cache(
             _print_name_results(id_hits)
             return len(id_hits)
 
+    # If query starts with @, try exact username match first
+    if query.strip().startswith("@"):
+        exact_row = fetch_listable_chat_row_by_username(db, query)
+        if exact_row:
+            _print_name_results([exact_row])
+            return 1
+        # Also check users/bots (fetch_listable only does channels/groups)
+        conn = _open_db(db)
+        try:
+            uname_val = query.strip().lstrip("@")
+            user_rows = conn.execute(
+                """
+                SELECT peer_kind, peer_id, COALESCE(title, ''), COALESCE(username, '')
+                FROM chats
+                WHERE username = ? COLLATE NOCASE AND peer_kind IN ('user', 'bot')
+                """,
+                (uname_val,),
+            ).fetchall()
+            if user_rows:
+                hits = [(str(r[0]), int(r[1]), str(r[2]), str(r[3])) for r in user_rows]
+                _print_name_results(hits)
+                return len(hits)
+        finally:
+            conn.close()
+
     hits = name_search_hits(db, query, min_score=min_score, channel_id=channel_id)
     _print_name_results(hits)
     return len(hits)

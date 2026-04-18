@@ -17,7 +17,7 @@ from telegram_toolkit.dm_cache import (
     DEFAULT_CACHE,
     refresh_cache,
     search_local,
-    show_peer,
+    show,
     _CacheTraceLive,
     _TracePeerSummary,
 )
@@ -82,7 +82,7 @@ def _run_refresh(
         else:
             line = (
                 f"# mode: top {recent_peer_limit} private chats by recency (rescan); "
-                f"channel/group rows: first {recent_peer_limit} dialogs only"
+                "# updating metadata for all channels and groups"
             )
             if rescan_top_all:
                 line += " — rescan-top-all: refresh every peer in that window"
@@ -144,7 +144,7 @@ def _cmd_full_rescan(ns: argparse.Namespace) -> int:
 def _cmd_show(ns: argparse.Namespace) -> int:
     if ns.user_id <= 0:
         raise SystemExit("show: USER_ID must be a positive Telegram user id.")
-    asyncio.run(show_peer(ns.user_id, ns.cache.resolve(), quiet=ns.notrace))
+    asyncio.run(show(ns.user_id, ns.cache.resolve(), quiet=ns.notrace))
     return 0
 
 

@@ -12,7 +12,7 @@ The toolkit is organized as a Python package (`telegram_toolkit`) with a main en
   - `cli.py`: Command-line interface definition (using `argparse`).
   - `resolver.py`: **(New)** Shared logic for resolving channel/group identifiers into Telegram entities. Handles fuzzy searching and user prompting for ambiguous matches.
   - `client.py`: Telethon client factory and configuration.
-  - `dm_cache.py`: Core synchronization logic for private messages and metadata.
+  - `dm_cache.py`: Core synchronization logic for private messages and metadata. Contains the `show` command logic.
   - `find_dm_peer.py`: Logic for searching users and channels by name, username, or ID.
   - `list_users.py`: Logic for listing and caching channel/megagroup members.
 

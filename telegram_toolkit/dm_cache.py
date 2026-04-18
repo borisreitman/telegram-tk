@@ -4,9 +4,9 @@ Private DM SQLite cache and Telegram sync (1:1 user chats).
 
 Use **telegram-tk search** for read-only cache search (1:1 message bodies only); **telegram-tk rescan**
 or **full-rescan** to pull from Telegram. **Rescan** (with ``--recent-peer-limit N``) updates
-**channel / basic-group** rows in **chats** only for dialogs in the **first N** slots returned by
-``iter_dialogs`` (same ``N`` as the private-chat window). **Full-rescan** updates **chats** for
-**every** channel and group. **User/bot** rows in **chats** are still updated for each user dialog
+**channel / basic-group** rows in **chats** for every dialog you control.
+**Full-rescan** updates **chats** for every channel and group you control.
+**User/bot** rows in **chats** are still updated for each user dialog
 visited. Only **private user** chats get rows in **messages**.
 Within the top-N rescan window, peers whose
 cache is only your outgoing (**from_me**) are skipped unless **--rescan-top-all**.
@@ -30,9 +30,8 @@ CLI (**telegram-tk**):
   telegram-tk full-rescan [--notrace]
   telegram-tk show 15840524
   telegram-tk name "ivan"
-  telegram-tk channel-member @Channel --id 123
 
-Importable as a library (**search_local**, **refresh_cache**, **show_peer**).
+Importable as a library (**search_local**, **refresh_cache**, **show**).
 ``python -m telegram_toolkit`` prepends ``search`` when the first CLI token is not a
 subcommand (legacy ``…py "query"`` style).
 
@@ -60,11 +59,11 @@ def _one_line(text: str) -> str:
     return (text or "").replace("\t", " ").replace("\r", " ").replace("\n", " ")
 
 
-def _private_chat_label(peer: User) -> str:
-    """Chat-list style **name** only (first/last); Telegram does not put @username there."""
-    if peer.deleted:
+def _entity_label(ent: User | Chat | Channel) -> str:
+    """Chat-list style name or title."""
+    if isinstance(ent, User) and ent.deleted:
         return "Deleted Account"
-    return utils.get_display_name(peer)
+    return utils.get_display_name(ent)
 
 
 def _open_db(path: Path) -> sqlite3.Connection:
@@ -349,7 +348,7 @@ def _row_tuple(peer: User, message: object) -> tuple:
         if len(utils.get_display_name(sender)) > len(utils.get_display_name(name_src)):
             name_src = sender
     uname = (name_src.username or "")
-    disp = _private_chat_label(name_src)
+    disp = _entity_label(name_src)
     mid = int(getattr(message, "id", 0))
     dt = message.date.isoformat() if getattr(message, "date", None) else ""
     body = getattr(message, "message", None) or ""
@@ -358,7 +357,7 @@ def _row_tuple(peer: User, message: object) -> tuple:
 
 
 class _TracePeerSummary:
-    """One stderr line per DM when finished (works in any terminal / capture)."""
+    """One stderr line per entity when finished (works in any terminal / capture)."""
 
     def __init__(self, file) -> None:
         self._file = file
@@ -366,9 +365,9 @@ class _TracePeerSummary:
         self._peer_new = 0
         self._total_new = 0
 
-    def start_peer(self, peer: User) -> None:
-        who = _private_chat_label(peer) or f"id={peer.id}"
-        self._peer_label = f"{who} (id={peer.id})"[:80]
+    def start_peer(self, ent: User | Chat | Channel) -> None:
+        who = _entity_label(ent) or f"id={ent.id}"
+        self._peer_label = f"{who} (id={ent.id})"[:80]
         self._peer_new = 0
 
     def note_messages(self, n: int) -> None:
@@ -379,8 +378,7 @@ class _TracePeerSummary:
 
     def end_peer(self) -> None:
         print(
-            f"# cache  {self._peer_label}  +{self._peer_new} new  "
-            f"(+{self._total_new} this run)",
+            f"# synced {self._peer_label}  +{self._peer_new} new",
             file=self._file,
             flush=True,
         )
@@ -400,9 +398,9 @@ class _CacheTraceLive:
         self._last_draw: float | None = None
         self._live_started = False
 
-    def start_peer(self, peer: User) -> None:
-        who = _private_chat_label(peer) or f"id={peer.id}"
-        self._peer_label = f"{who} (id={peer.id})"
+    def start_peer(self, ent: User | Chat | Channel) -> None:
+        who = _entity_label(ent) or f"id={ent.id}"
+        self._peer_label = f"{who} (id={ent.id})"
         self._peer_new = 0
         self._live_started = False
 
@@ -443,8 +441,7 @@ class _CacheTraceLive:
             self._file.write("\r\033[K")
             self._file.flush()
         print(
-            f"# cache  {self._peer_label}  +{self._peer_new} new  "
-            f"(+{self._total_new} this run)",
+            f"# synced {self._peer_label}  +{self._peer_new} new",
             file=self._file,
             flush=True,
         )
@@ -463,7 +460,7 @@ async def refresh_cache(
     client = make_client()
     await client.connect()
     if not await client.is_user_authorized():
-        raise SystemExit("Not authorized. Run: .venv/bin/python -m telegram_toolkit auth")
+        raise SystemExit("Not authorized. Run: python -m telegram_toolkit auth")
 
     conn = _open_db(db_path)
     ins = """
@@ -473,46 +470,55 @@ async def refresh_cache(
     """
     n_dialogs = 0
     n_msgs = 0
-    n_private_slot = 0
     n_deleted_skipped = 0
     n_meta_chats = 0
     selective = recent_peer_limit is not None and not rescan_top_all
-    cap_channel_meta = recent_peer_limit is not None
 
-    dialog_slot = 0
+    # Collect all dialogs first to group them
+    listables = []
+    privates = []
+
     async for dialog in client.iter_dialogs():
-        slot = dialog_slot
-        dialog_slot += 1
         ent = dialog.entity
-        if isinstance(ent, Channel):
-            if not cap_channel_meta or slot < recent_peer_limit:
-                kind = _channel_peer_kind(ent)
-                title = (ent.title or "").strip()
-                uname = (ent.username or "").strip()
-                _upsert_chat_meta(conn, kind, int(ent.id), title, uname)
-                n_meta_chats += 1
-            conn.commit()
-            continue
+        if isinstance(ent, (Channel, Chat)):
+            # Skip and remove deactivated basic groups
+            if isinstance(ent, Chat) and getattr(ent, "migrated_to", None):
+                conn.execute("DELETE FROM chats WHERE peer_kind = 'group' AND peer_id = ?", (ent.id,))
+                conn.commit()
+                continue
+            
+            # Filter for controlled channels/groups
+            if getattr(ent, "creator", False) or getattr(ent, "admin_rights", None):
+                listables.append(ent)
+        elif isinstance(ent, User):
+            # Skip official Telegram system/support accounts
+            if ent.id == 777000 or getattr(ent, "support", False):
+                continue
+            privates.append(ent)
 
-        if isinstance(ent, Chat):
-            if not cap_channel_meta or slot < recent_peer_limit:
-                title = (ent.title or "").strip()
-                _upsert_chat_meta(conn, "group", int(ent.id), title, "")
-                n_meta_chats += 1
-            conn.commit()
-            continue
+    # 1. Process controlled channels/groups
+    for ent in listables:
+        if trace_ui:
+            trace_ui.start_peer(ent)
+        kind = _channel_peer_kind(ent) if isinstance(ent, Channel) else "group"
+        title = (getattr(ent, "title", "") or "").strip()
+        uname = (getattr(ent, "username", "") or "").strip()
+        _upsert_chat_meta(conn, kind, int(ent.id), title, uname)
+        n_meta_chats += 1
+        conn.commit()
+        if trace_ui:
+            trace_ui.end_peer()
 
-        if not isinstance(ent, User):
-            continue
-
-        peer = ent
+    # 2. Process private user chats
+    n_private_slot = 0
+    for peer in privates:
         if peer.deleted:
             _purge_deleted_peer(conn, peer.id)
             conn.commit()
             n_deleted_skipped += 1
             continue
 
-        label = _private_chat_label(peer) or ""
+        label = _entity_label(peer) or ""
         uname = (peer.username or "").strip()
         kind = "bot" if peer.bot else "user"
         _upsert_chat_meta(conn, kind, int(peer.id), label, uname)
@@ -600,30 +606,31 @@ async def refresh_cache(
         )
 
 
-async def show_peer(user_id: int, db_path: Path, *, quiet: bool) -> None:
-    """Print cache + Telegram profile for one private-chat user id."""
+async def show(user_id: int, db_path: Path, *, quiet: bool) -> None:
+    """Print profile info for a Telegram id (user, chat, or channel)."""
     n, disp_max, user_max = 0, "", ""
     if db_path.is_file():
         conn = sqlite3.connect(db_path)
         try:
+            # Check messages table
             row = conn.execute(
                 "SELECT COUNT(*), MAX(display_name), MAX(username) FROM messages WHERE peer_user_id = ?",
                 (user_id,),
             ).fetchone()
             n, disp_max, user_max = int(row[0] or 0), row[1] or "", row[2] or ""
         except sqlite3.Error as e:
-            print(f"(cache read error: {e})", file=sys.stderr)
+            print(f"(database read error: {e})", file=sys.stderr)
         finally:
             conn.close()
 
     if not quiet:
-        print(f"# show peer_user_id={user_id} cache={db_path}", file=sys.stderr)
+        print(f"# show id={user_id} database={db_path}", file=sys.stderr)
 
-    print("--- cache (messages table) ---")
+    print("--- database (messages table) ---")
     if not db_path.is_file():
         print(f"(no database file at {db_path})")
     elif n == 0:
-        print("(no rows for this peer_user_id)")
+        print("(no messages for this id)")
     else:
         print(f"cached_messages\t{n}")
         print(f"display_name\t{disp_max or '(empty)'}")
@@ -634,40 +641,65 @@ async def show_peer(user_id: int, db_path: Path, *, quiet: bool) -> None:
     await client.connect()
     if not await client.is_user_authorized():
         await client.disconnect()
-        raise SystemExit("Not authorized. Run: .venv/bin/python -m telegram_toolkit auth")
-    try:
-        ent = await client.get_entity(user_id)
-    except Exception as e:
+        raise SystemExit("Not authorized. Run: python -m telegram_toolkit auth")
+
+    # Try various ID forms for get_entity
+    ent = None
+    last_err = None
+    # For channels/supergroups, Telethon often needs the marked ID
+    for ref in (user_id, -(1000000000000 + user_id), -user_id):
+        try:
+            ent = await client.get_entity(ref)
+            break
+        except Exception as e:
+            last_err = e
+
+    if not ent:
         await client.disconnect()
-        print(f"(failed: {e})")
+        print(f"(failed to resolve: {last_err})")
         print(
-            "Hint: id must be a user you can resolve (e.g. in dialogs, or known @username).",
+            "Hint: id must be an entity you can resolve (e.g. in dialogs, or known @username).",
             file=sys.stderr,
         )
         return
     await client.disconnect()
 
-    if not isinstance(ent, User):
-        print(f"(entity is {type(ent).__name__}, not a User)")
+    if isinstance(ent, User):
+        u = ent
+        label = _entity_label(u)
+        lines = [
+            ("kind", "user"),
+            ("user_id", str(u.id)),
+            ("name", label or "(empty)"),
+            ("first_name", u.first_name or ""),
+            ("last_name", u.last_name or ""),
+            ("username", f"@{u.username}" if u.username else ""),
+            ("phone", (u.phone or "").strip()),
+            ("bot", str(bool(u.bot))),
+            ("deleted", str(bool(u.deleted))),
+        ]
+    elif isinstance(ent, (Chat, Channel)):
+        is_channel = isinstance(ent, Channel)
+        kind = "channel" if is_channel and not getattr(ent, "megagroup", False) else "group"
+        if is_channel and getattr(ent, "megagroup", False):
+            kind = "supergroup"
+
+        lines = [
+            ("kind", kind),
+            ("id", str(ent.id)),
+            ("title", getattr(ent, "title", "")),
+            ("username", f"@{ent.username}" if getattr(ent, "username", None) else ""),
+            ("participants_count", str(getattr(ent, "participants_count", "unknown"))),
+        ]
+    else:
+        print(f"(entity is {type(ent).__name__}, unsupported type)")
         return
 
-    u = ent
-    label = _private_chat_label(u)
-    lines = [
-        ("user_id", str(u.id)),
-        ("chat_list_name", label or "(empty)"),
-        ("first_name", u.first_name or ""),
-        ("last_name", u.last_name or ""),
-        ("username", f"@{u.username}" if u.username else ""),
-        ("phone", (u.phone or "").strip()),
-        ("bot", str(bool(u.bot))),
-        ("deleted", str(bool(u.deleted))),
-        ("verified", str(bool(u.verified))),
-        ("restricted", str(bool(u.restricted))),
-    ]
     for k, v in lines:
         if v == "" and k in ("first_name", "last_name", "username", "phone"):
             continue
         print(f"{k}\t{v}")
-    if u.username:
-        print(f"https://t.me/{u.username}")
+
+    uname = getattr(ent, "username", None)
+    if uname:
+        print(f"https://t.me/{uname}")
